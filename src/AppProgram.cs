@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
+using System.Windows.Shapes;
 using Forms = System.Windows.Forms;
 using MediaColor = System.Windows.Media.Color;
 using MediaBrushes = System.Windows.Media.Brushes;
@@ -15,6 +18,334 @@ using DrawingColor = System.Drawing.Color;
 
 namespace AuraFolders
 {
+    /// <summary>
+    /// Full-screen click-through overlay window that renders Canva-style smart alignment lines,
+    /// desktop center/margin guides, and distance badges while the user drags a folder.
+    /// </summary>
+    public class CanvaGuideOverlayWindow : Window
+    {
+        private Canvas _canvas;
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+
+        public CanvaGuideOverlayWindow()
+        {
+            Title = "AuraFolders Canva Guides";
+            Left = 0;
+            Top = 0;
+            Width = SystemParameters.PrimaryScreenWidth;
+            Height = SystemParameters.PrimaryScreenHeight;
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = MediaBrushes.Transparent;
+            ShowInTaskbar = false;
+            ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
+            IsHitTestVisible = false;
+
+            _canvas = new Canvas
+            {
+                Width = Width,
+                Height = Height,
+                Background = MediaBrushes.Transparent,
+                IsHitTestVisible = false
+            };
+            Content = _canvas;
+
+            Loaded += (s, e) =>
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                int ex = DesktopNativeHelper.GetWindowLong(hwnd, GWL_EXSTYLE);
+                DesktopNativeHelper.SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+            };
+        }
+
+        public void ClearAndHide()
+        {
+            _canvas.Children.Clear();
+            if (Visibility == Visibility.Visible)
+            {
+                Visibility = Visibility.Collapsed;
+            }
+        }
+
+        public void RenderGuides(
+            FolderData dragged,
+            List<FolderData> allFolders,
+            double rawX,
+            double rawY,
+            out double snappedX,
+            out double snappedY)
+        {
+            double screenW = SystemParameters.PrimaryScreenWidth;
+            double screenH = SystemParameters.PrimaryScreenHeight;
+            Width = screenW;
+            Height = screenH;
+            _canvas.Width = screenW;
+            _canvas.Height = screenH;
+            _canvas.Children.Clear();
+
+            snappedX = rawX;
+            snappedY = rawY;
+
+            const double snapTolerance = 8.0;
+            const double halfBox = 38.0; // Half of 76x76 1x1 folder box
+
+            bool snappedToX = false;
+            bool snappedToY = false;
+
+            // Canva Colors:
+            // - Desktop Center / Margin Guides: Crisp Magenta/Purple (#FFE879F9) & Cyan (#FF38BDF8)
+            // - Folder-to-Folder Alignment: Canva Pink/Rose (#FFF43F5E)
+            SolidColorBrush centerBrush = new SolidColorBrush(MediaColor.FromArgb(230, 232, 121, 249));
+            SolidColorBrush marginBrush = new SolidColorBrush(MediaColor.FromArgb(175, 56, 189, 248));
+            SolidColorBrush folderAlignBrush = new SolidColorBrush(MediaColor.FromArgb(240, 244, 63, 94));
+            SolidColorBrush folderEdgeBrush = new SolidColorBrush(MediaColor.FromArgb(145, 244, 63, 94));
+
+            // 1. Desktop Safe Margin Box (Kiri, Kanan, Atas, Bawah Desktop)
+            double marginLeft = 130;
+            double marginRight = screenW - 130;
+            double marginTop = 110;
+            double marginBottom = screenH - 120;
+
+            // Check Desktop Horizontal Center (Sejajar Tengah Kiri-Kanan Desktop)
+            double screenCenterX = screenW / 2.0;
+            if (Math.Abs(rawX - screenCenterX) <= snapTolerance)
+            {
+                snappedX = screenCenterX;
+                snappedToX = true;
+                AddGuideLine(screenCenterX, 0, screenCenterX, screenH, centerBrush, 1.4, false);
+                AddGuideBadge(screenCenterX + 8, 36, "Tengah Desktop (X)", centerBrush);
+            }
+
+            // Check Desktop Vertical Center (Sejajar Tengah Atas-Bawah Desktop)
+            double screenCenterY = screenH / 2.0;
+            if (Math.Abs(rawY - screenCenterY) <= snapTolerance)
+            {
+                snappedY = screenCenterY;
+                snappedToY = true;
+                AddGuideLine(0, screenCenterY, screenW, screenCenterY, centerBrush, 1.4, false);
+                AddGuideBadge(36, screenCenterY - 26, "Tengah Desktop (Y)", centerBrush);
+            }
+
+            // Check Desktop Left / Right / Top / Bottom Margin Alignment
+            bool showMarginFrame = false;
+            if (!snappedToX && Math.Abs(rawX - marginLeft) <= snapTolerance)
+            {
+                snappedX = marginLeft;
+                snappedToX = true;
+                showMarginFrame = true;
+                AddGuideBadge(marginLeft + 8, rawY - 58, "Batas Kiri Desktop", marginBrush);
+            }
+            else if (!snappedToX && Math.Abs(rawX - marginRight) <= snapTolerance)
+            {
+                snappedX = marginRight;
+                snappedToX = true;
+                showMarginFrame = true;
+                AddGuideBadge(marginRight - 130, rawY - 58, "Batas Kanan Desktop", marginBrush);
+            }
+
+            if (!snappedToY && Math.Abs(rawY - marginTop) <= snapTolerance)
+            {
+                snappedY = marginTop;
+                snappedToY = true;
+                showMarginFrame = true;
+                AddGuideBadge(rawX + 48, marginTop - 12, "Batas Atas Desktop", marginBrush);
+            }
+            else if (!snappedToY && Math.Abs(rawY - marginBottom) <= snapTolerance)
+            {
+                snappedY = marginBottom;
+                snappedToY = true;
+                showMarginFrame = true;
+                AddGuideBadge(rawX + 48, marginBottom - 12, "Batas Bawah Desktop", marginBrush);
+            }
+
+            if (showMarginFrame)
+            {
+                // Draw Canva-style dashed desktop margin frame
+                System.Windows.Shapes.Rectangle frameRect = new System.Windows.Shapes.Rectangle
+                {
+                    Width = marginRight - marginLeft,
+                    Height = marginBottom - marginTop,
+                    Stroke = marginBrush,
+                    StrokeThickness = 1.2,
+                    StrokeDashArray = new DoubleCollection(new double[] { 5, 4 })
+                };
+                Canvas.SetLeft(frameRect, marginLeft);
+                Canvas.SetTop(frameRect, marginTop);
+                _canvas.Children.Add(frameRect);
+            }
+
+            // 2. Folder-to-Folder Alignment & Magnetic Spacing (Sejajar dengan Folder Samping / Atas-Bawah)
+            const double standardGridSpacing = 115.0; // Standard center-to-center distance between 1x1 folders
+
+            foreach (FolderData other in allFolders)
+            {
+                if (other.Id == dragged.Id) continue;
+
+                // A. Horizontal Row Alignment (Sejajar Kiri-Kanan dengan Folder Sampingnya)
+                if (Math.Abs(snappedY - other.Y) <= snapTolerance)
+                {
+                    if (!snappedToY)
+                    {
+                        snappedY = other.Y;
+                        snappedToY = true;
+                    }
+
+                    // Also check if X is near standard 115px grid spacing next to this aligned folder!
+                    if (!snappedToX)
+                    {
+                        if (Math.Abs((rawX - other.X) - standardGridSpacing) <= snapTolerance)
+                        {
+                            snappedX = other.X + standardGridSpacing;
+                            snappedToX = true;
+                        }
+                        else if (Math.Abs((other.X - rawX) - standardGridSpacing) <= snapTolerance)
+                        {
+                            snappedX = other.X - standardGridSpacing;
+                            snappedToX = true;
+                        }
+                    }
+
+                    double minX = Math.Min(snappedX, other.X) - 65;
+                    double maxX = Math.Max(snappedX, other.X) + 65;
+
+                    // Center line + Top & Bottom bounding box edge lines (Canva style!)
+                    AddGuideLine(minX, other.Y, maxX, other.Y, folderAlignBrush, 1.4, false);
+                    AddGuideLine(minX, other.Y - halfBox, maxX, other.Y - halfBox, folderEdgeBrush, 1.0, true);
+                    AddGuideLine(minX, other.Y + halfBox, maxX, other.Y + halfBox, folderEdgeBrush, 1.0, true);
+
+                    // Draw Canva distance indicator pill between the two folders if they are neighbors
+                    double centerDist = Math.Abs(snappedX - other.X);
+                    double edgeGap = centerDist - (halfBox * 2);
+                    if (edgeGap > 4 && edgeGap < 260)
+                    {
+                        double gapStartX = Math.Min(snappedX, other.X) + halfBox;
+                        double gapEndX = Math.Max(snappedX, other.X) - halfBox;
+                        double midX = (gapStartX + gapEndX) / 2.0;
+                        AddDistanceIndicatorHorizontal(gapStartX, gapEndX, other.Y + halfBox + 18, (int)Math.Round(edgeGap));
+                        AddGuideBadge(midX - 22, other.Y - halfBox - 26, ((int)Math.Round(edgeGap)) + " px", folderAlignBrush);
+                    }
+                }
+
+                // B. Vertical Column Alignment (Sejajar Atas-Bawah dengan Folder Lain)
+                if (Math.Abs(snappedX - other.X) <= snapTolerance)
+                {
+                    if (!snappedToX)
+                    {
+                        snappedX = other.X;
+                        snappedToX = true;
+                    }
+
+                    if (!snappedToY)
+                    {
+                        if (Math.Abs((rawY - other.Y) - standardGridSpacing) <= snapTolerance)
+                        {
+                            snappedY = other.Y + standardGridSpacing;
+                            snappedToY = true;
+                        }
+                        else if (Math.Abs((other.Y - rawY) - standardGridSpacing) <= snapTolerance)
+                        {
+                            snappedY = other.Y - standardGridSpacing;
+                            snappedToY = true;
+                        }
+                    }
+
+                    double minY = Math.Min(snappedY, other.Y) - 65;
+                    double maxY = Math.Max(snappedY, other.Y) + 65;
+
+                    // Center vertical line + Left & Right bounding box edge lines (Canva style!)
+                    AddGuideLine(other.X, minY, other.X, maxY, folderAlignBrush, 1.4, false);
+                    AddGuideLine(other.X - halfBox, minY, other.X - halfBox, maxY, folderEdgeBrush, 1.0, true);
+                    AddGuideLine(other.X + halfBox, minY, other.X + halfBox, maxY, folderEdgeBrush, 1.0, true);
+
+                    double centerDistY = Math.Abs(snappedY - other.Y);
+                    double edgeGapY = centerDistY - (halfBox * 2);
+                    if (edgeGapY > 4 && edgeGapY < 260)
+                    {
+                        double midY = (snappedY + other.Y) / 2.0;
+                        AddGuideBadge(other.X + halfBox + 10, midY - 10, ((int)Math.Round(edgeGapY)) + " px", folderAlignBrush);
+                    }
+                }
+            }
+
+            // Draw subtle target bounding box around the snapped 1x1 folder position
+            System.Windows.Shapes.Rectangle activeBox = new System.Windows.Shapes.Rectangle
+            {
+                Width = halfBox * 2,
+                Height = halfBox * 2,
+                RadiusX = 20,
+                RadiusY = 20,
+                Stroke = (snappedToX || snappedToY) ? folderAlignBrush : marginBrush,
+                StrokeThickness = 1.4,
+                StrokeDashArray = new DoubleCollection(new double[] { 3, 2 })
+            };
+            Canvas.SetLeft(activeBox, snappedX - halfBox);
+            Canvas.SetTop(activeBox, snappedY - halfBox);
+            _canvas.Children.Add(activeBox);
+
+            if (Visibility != Visibility.Visible)
+            {
+                Visibility = Visibility.Visible;
+            }
+        }
+
+        private void AddGuideLine(double x1, double y1, double x2, double y2, System.Windows.Media.Brush stroke, double thickness, bool dashed)
+        {
+            Line line = new Line
+            {
+                X1 = x1,
+                Y1 = y1,
+                X2 = x2,
+                Y2 = y2,
+                Stroke = stroke,
+                StrokeThickness = thickness,
+                SnapsToDevicePixels = true
+            };
+            if (dashed)
+            {
+                line.StrokeDashArray = new DoubleCollection(new double[] { 4, 3 });
+            }
+            _canvas.Children.Add(line);
+        }
+
+        private void AddDistanceIndicatorHorizontal(double x1, double x2, double y, int gapPx)
+        {
+            SolidColorBrush br = new SolidColorBrush(MediaColor.FromArgb(220, 244, 63, 94));
+            AddGuideLine(x1, y, x2, y, br, 1.2, false);
+            AddGuideLine(x1, y - 4, x1, y + 4, br, 1.2, false);
+            AddGuideLine(x2, y - 4, x2, y + 4, br, 1.2, false);
+        }
+
+        private void AddGuideBadge(double x, double y, string text, System.Windows.Media.Brush accentBrush)
+        {
+            Border pill = new Border
+            {
+                Background = new SolidColorBrush(MediaColor.FromArgb(235, 14, 14, 19)),
+                BorderBrush = accentBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(7),
+                Padding = new Thickness(6, 2, 6, 2.5)
+            };
+
+            TextBlock tb = new TextBlock
+            {
+                Text = text,
+                Foreground = MediaBrushes.White,
+                FontFamily = new System.Windows.Media.FontFamily("Segoe UI Semibold"),
+                FontSize = 10
+            };
+            pill.Child = tb;
+
+            Canvas.SetLeft(pill, x);
+            Canvas.SetTop(pill, y);
+            _canvas.Children.Add(pill);
+        }
+    }
+
     public class SettingsWindow : Window
     {
         private readonly FolderManagerController _controller;
@@ -67,7 +398,6 @@ namespace AuraFolders
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(60) });
 
-            // 1. Header Bar
             Border header = new Border
             {
                 Background = new SolidColorBrush(MediaColor.FromArgb(14, 255, 255, 255)),
@@ -86,7 +416,7 @@ namespace AuraFolders
 
             TextBlock titleText = new TextBlock
             {
-                Text = "⚙  Pengaturan AuraFolders",
+                Text = "⚙  Pengaturan HoverFold",
                 Foreground = MediaBrushes.White,
                 FontFamily = new System.Windows.Media.FontFamily("Segoe UI Semibold"),
                 FontSize = 14,
@@ -103,14 +433,12 @@ namespace AuraFolders
             headerGrid.Children.Add(closeWinBtn);
             header.Child = headerGrid;
 
-            // 2. Divider
             Border div = new Border
             {
                 Background = new SolidColorBrush(MediaColor.FromArgb(24, 255, 255, 255)),
                 Height = 1
             };
 
-            // 3. Settings Body
             ScrollViewer bodyScroll = new ScrollViewer
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
@@ -119,7 +447,6 @@ namespace AuraFolders
 
             StackPanel body = new StackPanel();
 
-            // Section: Theme Preset
             body.Children.Add(CreateSectionLabel("TEMA VISUAL (AESTHETIC PRESET)"));
             WrapPanel themeRow = new WrapPanel { Margin = new Thickness(0, 0, 0, 14) };
             string[] themes = new[] { "Obsidian", "Frosted", "Campfire", "Midnight" };
@@ -141,7 +468,6 @@ namespace AuraFolders
             }
             body.Children.Add(themeRow);
 
-            // Section: Opacity Slider
             TextBlock opacityLabel = CreateSectionLabel("TRANSPARANSI BACKGROUND (" + (int)Math.Round(cfg.CardOpacity * 100) + "%)");
             body.Children.Add(opacityLabel);
 
@@ -163,7 +489,6 @@ namespace AuraFolders
             };
             body.Children.Add(opacitySlider);
 
-            // Section: Grid Columns (3 vs 4) & Idle Size
             body.Children.Add(CreateSectionLabel("LAYOUT GRID SAAT MEKAR (HOVER)"));
             StackPanel colRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 14) };
 
@@ -188,7 +513,6 @@ namespace AuraFolders
             colRow.Children.Add(col4Btn);
             body.Children.Add(colRow);
 
-            // Section: 1x1 Folder Box Size
             body.Children.Add(CreateSectionLabel("UKURAN KOTAK FOLDER 1x1 DI DESKTOP"));
             StackPanel scaleRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 14) };
             double[] scales = new[] { 0.88, 1.0, 1.15 };
@@ -210,7 +534,6 @@ namespace AuraFolders
             }
             body.Children.Add(scaleRow);
 
-            // Section: Count Badge & Native Desktop Icons
             body.Children.Add(CreateSectionLabel("OPSI DESKTOP & SHORTCUT"));
             StackPanel quickRow = new StackPanel { Orientation = Orientation.Vertical };
 
@@ -246,7 +569,6 @@ namespace AuraFolders
 
             bodyScroll.Content = body;
 
-            // 4. Footer with Big Clear "Matikan / Close AuraFolders (Dev Mode)" Button
             Border footer = new Border
             {
                 Background = new SolidColorBrush(MediaColor.FromArgb(14, 255, 255, 255)),
@@ -260,7 +582,7 @@ namespace AuraFolders
 
             Button killAppBtn = new Button
             {
-                Content = "✖  Matikan AuraFolders (Close App)",
+                Content = "✖  Matikan Aplikasi (Close App)",
                 Height = 34,
                 Padding = new Thickness(14, 0, 14, 0),
                 Cursor = Cursors.Hand,
@@ -379,6 +701,7 @@ namespace AuraFolders
         private System.Windows.Threading.DispatcherTimer _zOrderTimer;
         private IntPtr _lastForegroundHwnd = IntPtr.Zero;
         private SettingsWindow _settingsWindow;
+        private CanvaGuideOverlayWindow _canvaOverlay;
 
         public void Initialize()
         {
@@ -387,9 +710,33 @@ namespace AuraFolders
 
             Config = ConfigManager.LoadOrCreateDefault(screenW, screenH);
             IconExtractor.ClearCache();
+
+            _canvaOverlay = new CanvaGuideOverlayWindow();
+            _canvaOverlay.Show();
+            _canvaOverlay.ClearAndHide();
+
             SpawnAllFolderWindows();
             SetupSystemTray();
             StartDesktopZOrderWatchdog();
+        }
+
+        public void UpdateCanvaAlignmentGuides(FolderData dragged, double rawX, double rawY, out double snappedX, out double snappedY)
+        {
+            if (_canvaOverlay == null)
+            {
+                snappedX = rawX;
+                snappedY = rawY;
+                return;
+            }
+            _canvaOverlay.RenderGuides(dragged, Config.Folders, rawX, rawY, out snappedX, out snappedY);
+        }
+
+        public void HideCanvaAlignmentGuides()
+        {
+            if (_canvaOverlay != null)
+            {
+                _canvaOverlay.ClearAndHide();
+            }
         }
 
         public void OpenSettingsWindow()
@@ -432,6 +779,12 @@ namespace AuraFolders
                     return;
 
                 HashSet<IntPtr> ourHwnds = new HashSet<IntPtr>();
+                if (_canvaOverlay != null)
+                {
+                    IntPtr overlayHwnd = new WindowInteropHelper(_canvaOverlay).Handle;
+                    if (overlayHwnd != IntPtr.Zero) ourHwnds.Add(overlayHwnd);
+                }
+
                 foreach (FolderWidgetWindow w in _windows)
                 {
                     if (w.Hwnd != IntPtr.Zero)
@@ -561,7 +914,7 @@ namespace AuraFolders
             {
                 MessageBox.Show(
                     "Minimal harus ada 1 folder di desktop.",
-                    "AuraFolders",
+                    "HoverFold",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
                 return;
@@ -663,7 +1016,7 @@ namespace AuraFolders
             _trayIcon = new Forms.NotifyIcon
             {
                 Icon = CreateMonochromeTrayIcon(),
-                Text = "AuraFolders — Klik kiri untuk Pengaturan, Klik kanan untuk Menu",
+                Text = "HoverFold — Klik kiri untuk Pengaturan, Klik kanan untuk Menu",
                 Visible = true
             };
 
@@ -683,7 +1036,7 @@ namespace AuraFolders
             trayMenu.Items.Add("👁 Sembunyikan / Tampilkan Icon Desktop Bawaan", null, (s, e) => DesktopNativeHelper.ToggleNativeDesktopIcons());
             trayMenu.Items.Add("🔄 Scan Ulang Shortcut Desktop", null, (s, e) => RescanDesktopShortcuts());
             trayMenu.Items.Add(new Forms.ToolStripSeparator());
-            trayMenu.Items.Add("✖ Matikan / Keluar dari AuraFolders", null, (s, e) =>
+            trayMenu.Items.Add("✖ Matikan / Keluar dari Aplikasi", null, (s, e) =>
             {
                 CleanupTray();
                 Application.Current.Shutdown();
@@ -694,6 +1047,11 @@ namespace AuraFolders
 
         public void CleanupTray()
         {
+            if (_canvaOverlay != null)
+            {
+                try { _canvaOverlay.Close(); } catch { }
+                _canvaOverlay = null;
+            }
             if (_trayIcon != null)
             {
                 _trayIcon.Visible = false;
@@ -735,7 +1093,6 @@ namespace AuraFolders
         [STAThread]
         public static void Main(string[] args)
         {
-            // During development/updates: automatically close any previous running AuraFolders instance
             try
             {
                 int currentPid = System.Diagnostics.Process.GetCurrentProcess().Id;
@@ -757,10 +1114,6 @@ namespace AuraFolders
 
             bool createdNew;
             _mutex = new Mutex(true, "AuraFolders_SingleInstance_Mutex_V2_" + Environment.UserName, out createdNew);
-            if (!createdNew)
-            {
-                return;
-            }
 
             Application app = new Application
             {

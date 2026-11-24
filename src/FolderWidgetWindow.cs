@@ -72,7 +72,6 @@ namespace AuraFolders
                 };
             }
 
-            // Default: "Obsidian" (Sleek Dynamic Island Dark Monochrome)
             return new ThemePalette
             {
                 TopGrad = Color.FromArgb(alphaTop, 24, 24, 31),
@@ -109,11 +108,15 @@ namespace AuraFolders
 
         private DispatcherTimer _hoverOpenTimer;
         private DispatcherTimer _hoverCloseTimer;
+        private DispatcherTimer _holdGrabTimer;
         private bool _isExpanded = false;
+        private bool _isPointerDown = false;
         private bool _isDraggingWindow = false;
-        private Point _dragStartMousePos;
-        private double _dragStartLeft;
-        private double _dragStartTop;
+        private bool _startedDragFromExpanded = false;
+        private Point _pointerDownScreenDip;
+        private double _dragStartFolderX;
+        private double _dragStartFolderY;
+        private UIElement _capturedDragElement;
         private Point _appDragStartPoint;
         private bool _isDialogOpen = false;
         private bool _currentlyTopmost = false;
@@ -148,7 +151,7 @@ namespace AuraFolders
 
         public FolderData Folder { get { return _folder; } }
         public bool IsExpanded { get { return _isExpanded; } }
-        public bool IsDraggingOrDialog { get { return _isDraggingWindow || _isDialogOpen; } }
+        public bool IsDraggingOrDialog { get { return _isDraggingWindow || _isPointerDown || _isDialogOpen; } }
         public IntPtr Hwnd { get; private set; }
 
         public FolderWidgetWindow(FolderData folder, FolderManagerController controller)
@@ -175,7 +178,7 @@ namespace AuraFolders
             _hoverOpenTimer.Tick += (s, e) =>
             {
                 _hoverOpenTimer.Stop();
-                if (!_isDraggingWindow)
+                if (!_isDraggingWindow && !_isPointerDown)
                 {
                     ExpandFolder();
                 }
@@ -185,10 +188,21 @@ namespace AuraFolders
             _hoverCloseTimer.Tick += (s, e) =>
             {
                 _hoverCloseTimer.Stop();
-                if (_isDialogOpen) return;
+                if (_isDialogOpen || _isDraggingWindow || _isPointerDown) return;
                 if (!_expandedCard.IsMouseOver && !_idleContainer.IsMouseOver)
                 {
                     CollapseFolder();
+                }
+            };
+
+            // Hold timer: holding mouse down for 150ms immediately activates semi-transparent Pick-Up Mode
+            _holdGrabTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _holdGrabTimer.Tick += (s, e) =>
+            {
+                _holdGrabTimer.Stop();
+                if (_isPointerDown && !_isDraggingWindow)
+                {
+                    EngageDragPickUpMode();
                 }
             };
 
@@ -342,7 +356,6 @@ namespace AuraFolders
                 HorizontalAlignment = HorizontalAlignment.Center
             };
 
-            // Modern iOS / macOS Dark Glass Squircle
             _idleFolderBox = new Border
             {
                 Width = 76,
@@ -370,7 +383,6 @@ namespace AuraFolders
             _idleFolderBox.Child = _miniIconGrid;
             boxWrapper.Children.Add(_idleFolderBox);
 
-            // Sleek Pill Badge in top-right corner
             _idleCountBadge = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(245, 24, 24, 31)),
@@ -428,7 +440,7 @@ namespace AuraFolders
             _idleContainer.MouseEnter += (s, e) =>
             {
                 _hoverCloseTimer.Stop();
-                if (!_isExpanded && !_isDraggingWindow)
+                if (!_isExpanded && !_isDraggingWindow && !_isPointerDown)
                 {
                     _hoverOpenTimer.Start();
                 }
@@ -437,13 +449,13 @@ namespace AuraFolders
             _idleContainer.MouseLeave += (s, e) =>
             {
                 _hoverOpenTimer.Stop();
-                if (_isExpanded)
+                if (_isExpanded && !_isDraggingWindow && !_isPointerDown)
                 {
                     _hoverCloseTimer.Start();
                 }
             };
 
-            _idleContainer.MouseLeftButtonDown += OnFolderMouseLeftButtonDown;
+            _idleContainer.MouseLeftButtonDown += (s, e) => StartPointerHold( _idleContainer, e, false );
             _idleContainer.MouseMove += OnFolderMouseMove;
             _idleContainer.MouseLeftButtonUp += OnFolderMouseLeftButtonUp;
             _idleContainer.MouseRightButtonUp += (s, e) =>
@@ -478,19 +490,27 @@ namespace AuraFolders
                 }
             };
 
+            // Allowing hold-to-drag from anywhere on the expanded card background too!
+            _expandedCard.MouseLeftButtonDown += (s, e) =>
+            {
+                if (e.ClickCount == 2) return;
+                StartPointerHold(_expandedCard, e, true);
+            };
+            _expandedCard.MouseMove += OnFolderMouseMove;
+            _expandedCard.MouseLeftButtonUp += OnFolderMouseLeftButtonUp;
+
             Grid cardLayout = new Grid();
             cardLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(46) });
             cardLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1) });
             cardLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            // 1. Sleek Modern Header (Title + subtle count on left; compact circular icon buttons on right)
             Border headerBar = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(14, 255, 255, 255)),
                 CornerRadius = new CornerRadius(24, 24, 0, 0),
                 Padding = new Thickness(16, 0, 12, 0),
                 Cursor = Cursors.SizeAll,
-                ToolTip = "Tahan & geser untuk pindah posisi • Klik 2x judul untuk ganti nama"
+                ToolTip = "Tahan & geser untuk memindahkan folder (Canva Smart Snap) • Klik 2x judul untuk ganti nama"
             };
             headerBar.MouseLeftButtonDown += OnHeaderMouseLeftButtonDown;
             headerBar.MouseMove += OnFolderMouseMove;
@@ -543,7 +563,6 @@ namespace AuraFolders
             titleStack.Children.Add(_expandedTitleText);
             titleStack.Children.Add(headerCountPill);
 
-            // Sleek Circular Icon Buttons: [+] (Add App), [⚙] (Settings), [⋯] (Folder Menu)
             StackPanel actionButtons = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -569,14 +588,12 @@ namespace AuraFolders
             headerGrid.Children.Add(actionButtons);
             headerBar.Child = headerGrid;
 
-            // 2. Hairline Glass Divider
             Border divider = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255)),
                 Height = 1
             };
 
-            // 3. Clean ScrollViewer with HIDDEN ugly scrollbar (scrolls smoothly with mouse wheel!)
             _appsScrollViewer = new ScrollViewer
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
@@ -614,7 +631,7 @@ namespace AuraFolders
 
             _expandedCard.MouseLeave += (s, e) =>
             {
-                if (!_isDraggingWindow && !_isDialogOpen)
+                if (!_isDraggingWindow && !_isPointerDown && !_isDialogOpen)
                 {
                     _hoverCloseTimer.Start();
                 }
@@ -685,12 +702,10 @@ namespace AuraFolders
             _expandedCard.Background = glassBg;
             _expandedCard.BorderBrush = borderBrush;
 
-            // Idle scale & count badge visibility
             _idleScaleTransform.ScaleX = cfg.IdleTileScale;
             _idleScaleTransform.ScaleY = cfg.IdleTileScale;
             _idleCountBadge.Visibility = cfg.ShowCountBadge ? Visibility.Visible : Visibility.Collapsed;
 
-            // 3 columns vs 4 columns width math (exact symmetry, zero wasted gap on right)
             int cols = cfg.GridColumns;
             if (cols == 4)
             {
@@ -720,7 +735,6 @@ namespace AuraFolders
             _idleCountText.Text = count.ToString();
             _expandedCountText.Text = count.ToString();
 
-            // 1. Populate 2x2 Mini Preview inside the 1x1 Idle Folder Squircle
             _miniIconGrid.Children.Clear();
             for (int i = 0; i < 4; i++)
             {
@@ -764,7 +778,6 @@ namespace AuraFolders
                 _miniIconGrid.Children.Add(cell);
             }
 
-            // 2. Populate Expanded App Grid
             _appsWrapPanel.Children.Clear();
             if (_folder.Apps == null || _folder.Apps.Count == 0)
             {
@@ -847,7 +860,6 @@ namespace AuraFolders
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            // Modern squircle icon container
             Border iconHolder = new Border
             {
                 Width = 44,
@@ -914,6 +926,7 @@ namespace AuraFolders
 
             tileBorder.MouseLeftButtonDown += (s, e) =>
             {
+                e.Handled = true;
                 _appDragStartPoint = e.GetPosition(this);
             };
 
@@ -965,13 +978,14 @@ namespace AuraFolders
 
         public void ExpandFolder()
         {
-            if (_isExpanded) return;
+            if (_isExpanded || _isDraggingWindow) return;
             _isExpanded = true;
 
             _controller.NotifyFolderExpanding(this);
             Activate();
 
             _expandedCard.Visibility = Visibility.Visible;
+            _idleContainer.BeginAnimation(UIElement.OpacityProperty, null);
             _idleContainer.Opacity = 0;
             _idleContainer.IsHitTestVisible = false;
 
@@ -1034,14 +1048,34 @@ namespace AuraFolders
             }
         }
 
-        private void OnFolderMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        // Convert physical screen point to exact WPF Device-Independent Pixels (1:1 cursor tracking at any DPI!)
+        private Point GetCursorScreenDip(MouseEventArgs e)
+        {
+            Point physPt = PointToScreen(e.GetPosition(this));
+            PresentationSource src = PresentationSource.FromVisual(this);
+            if (src != null && src.CompositionTarget != null)
+            {
+                return src.CompositionTarget.TransformFromDevice.Transform(physPt);
+            }
+            return physPt;
+        }
+
+        // Hold-to-Drag Pick-Up Mode (Semi-transparent 1x1 Folder + Canva Alignment Guides)
+        private void StartPointerHold(UIElement captureElement, MouseButtonEventArgs e, bool fromExpanded)
         {
             _hoverOpenTimer.Stop();
-            _isDraggingWindow = true;
-            _dragStartMousePos = PointToScreen(e.GetPosition(this));
-            _dragStartLeft = Left;
-            _dragStartTop = Top;
-            ((UIElement)sender).CaptureMouse();
+            _hoverCloseTimer.Stop();
+
+            _isPointerDown = true;
+            _isDraggingWindow = false;
+            _startedDragFromExpanded = fromExpanded;
+            _capturedDragElement = captureElement;
+            _pointerDownScreenDip = GetCursorScreenDip(e);
+            _dragStartFolderX = _folder.X;
+            _dragStartFolderY = _folder.Y;
+
+            captureElement.CaptureMouse();
+            _holdGrabTimer.Start();
             e.Handled = true;
         }
 
@@ -1049,42 +1083,128 @@ namespace AuraFolders
         {
             if (e.ClickCount == 2)
             {
+                _holdGrabTimer.Stop();
+                _isPointerDown = false;
                 e.Handled = true;
                 PromptRenameFolder();
                 return;
             }
-            OnFolderMouseLeftButtonDown(sender, e);
+            StartPointerHold((UIElement)sender, e, true);
+        }
+
+        private void EngageDragPickUpMode()
+        {
+            if (_isDraggingWindow) return;
+            _isDraggingWindow = true;
+            _hoverOpenTimer.Stop();
+            _hoverCloseTimer.Stop();
+
+            // If we started holding while the folder was expanded, collapse it into the compact 1x1 folder icon
+            // and center it smoothly under the cursor so you can see exactly where the 1x1 folder lines up!
+            if (_isExpanded)
+            {
+                _isExpanded = false;
+                _expandedCard.BeginAnimation(UIElement.OpacityProperty, null);
+                _expandedCard.Opacity = 0;
+                _expandedCard.Visibility = Visibility.Collapsed;
+                _idleContainer.IsHitTestVisible = true;
+            }
+
+            if (_startedDragFromExpanded)
+            {
+                // Snap the 1x1 folder center to the initial grab point so it feels picked up right under the cursor
+                _dragStartFolderX = _pointerDownScreenDip.X;
+                _dragStartFolderY = _pointerDownScreenDip.Y;
+                _folder.X = _dragStartFolderX;
+                _folder.Y = _dragStartFolderY;
+                Left = _folder.X - (CanvasWidth / 2.0);
+                Top = _folder.Y - (CanvasHeight / 2.0);
+            }
+
+            // Visual "Picked Up & Semi-Transparent" feedback (like iOS/Tab folder drag)
+            double baseScale = _controller.Config != null ? _controller.Config.IdleTileScale : 1.0;
+            _idleContainer.BeginAnimation(UIElement.OpacityProperty, null);
+            _idleContainer.Opacity = 0.62;
+            _idleScaleTransform.ScaleX = baseScale * 1.08;
+            _idleScaleTransform.ScaleY = baseScale * 1.08;
+            _idleFolderBox.BorderBrush = new SolidColorBrush(Color.FromArgb(230, 56, 189, 248)); // Cyan/Canva active drag rim
+
+            double initSnapX;
+            double initSnapY;
+            _controller.UpdateCanvaAlignmentGuides(_folder, _folder.X, _folder.Y, out initSnapX, out initSnapY);
+            _folder.X = initSnapX;
+            _folder.Y = initSnapY;
+            Left = _folder.X - (CanvasWidth / 2.0);
+            Top = _folder.Y - (CanvasHeight / 2.0);
         }
 
         private void OnFolderMouseMove(object sender, MouseEventArgs e)
         {
-            if (!_isDraggingWindow) return;
-            Point currentScreenPos = PointToScreen(e.GetPosition(this));
-            double dx = currentScreenPos.X - _dragStartMousePos.X;
-            double dy = currentScreenPos.Y - _dragStartMousePos.Y;
+            if (!_isPointerDown) return;
 
-            Left = _dragStartLeft + dx;
-            Top = _dragStartTop + dy;
+            Point currentDip = GetCursorScreenDip(e);
+            double dx = currentDip.X - _pointerDownScreenDip.X;
+            double dy = currentDip.Y - _pointerDownScreenDip.Y;
+            double dist = Math.Sqrt((dx * dx) + (dy * dy));
 
-            _folder.X = Left + (CanvasWidth / 2.0);
-            _folder.Y = Top + (CanvasHeight / 2.0);
+            if (!_isDraggingWindow)
+            {
+                if (dist > 4.0)
+                {
+                    _holdGrabTimer.Stop();
+                    EngageDragPickUpMode();
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            double rawTargetX = _dragStartFolderX + dx;
+            double rawTargetY = _dragStartFolderY + dy;
+
+            double snappedX;
+            double snappedY;
+            _controller.UpdateCanvaAlignmentGuides(_folder, rawTargetX, rawTargetY, out snappedX, out snappedY);
+
+            _folder.X = snappedX;
+            _folder.Y = snappedY;
+
+            Left = _folder.X - (CanvasWidth / 2.0);
+            Top = _folder.Y - (CanvasHeight / 2.0);
         }
 
         private void OnFolderMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            if (!_isDraggingWindow) return;
+            if (!_isPointerDown) return;
+
+            _holdGrabTimer.Stop();
+            bool wasDragging = _isDraggingWindow;
+            _isPointerDown = false;
             _isDraggingWindow = false;
-            ((UIElement)sender).ReleaseMouseCapture();
 
-            Point endPos = PointToScreen(e.GetPosition(this));
-            double movedDist = Math.Sqrt(Math.Pow(endPos.X - _dragStartMousePos.X, 2) + Math.Pow(endPos.Y - _dragStartMousePos.Y, 2));
+            if (_capturedDragElement != null)
+            {
+                _capturedDragElement.ReleaseMouseCapture();
+                _capturedDragElement = null;
+            }
 
-            _controller.SaveConfig();
+            _controller.HideCanvaAlignmentGuides();
 
-            if (movedDist < 5 && !_isExpanded)
+            // Restore normal opacity, scale, and border from Pick-Up Mode
+            _idleContainer.BeginAnimation(UIElement.OpacityProperty, null);
+            _idleContainer.Opacity = _isExpanded ? 0.0 : 1.0;
+            ApplyThemeAndSettings();
+
+            if (wasDragging)
+            {
+                _controller.SaveConfig();
+            }
+            else if (!_isExpanded)
             {
                 ExpandFolder();
             }
+
             e.Handled = true;
         }
 
