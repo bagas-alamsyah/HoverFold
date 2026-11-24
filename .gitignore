@@ -1,0 +1,12 @@
+# Build outputs & runtime generated files
+AuraFolders.exe
+*.pdb
+folders_config.json
+startup.log
+diagnostics.log
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vs/
+.vscode/
